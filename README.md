@@ -1,66 +1,96 @@
 # CHRPS Visual Servo
 
-This repository contains a customized **ViSP-based visual servoing** example for the Franka Research 3 (Panda) robot.  
-It extends the standard `servoFrankaIBVS` demo with additional features such as:
-
-- **Configurable AprilTag size** (`--tag-size`)
-- **Custom desired distance factor** (`--desired-factor`)
-- **Fallback behavior**: if no tag is detected, the robot automatically steps back to try and find the tag again
-- Clean, standalone CMake build (does not require building all of ViSP examples)
+Visual servoing application for the Franka Research 3 (FR3) robot using ViSP and an Intel RealSense camera.  
+This project extends ViSP’s `servoFrankaIBVS` example with configurable tag size, adjustable desired distance, and basic recovery behavior when the AprilTag is not visible.
 
 ---
 
-## Build Instructions
+## 📦 Dependencies
 
-First make sure you have ViSP installed locally (with CMake config available):
+- [libfranka](https://frankaemika.github.io/docs/installation_linux.html) (for FR3)
+- [ViSP](https://visp.inria.fr) >= 3.6, built with RealSense and Franka support
+- [Intel RealSense SDK 2.x](https://github.com/IntelRealSense/librealsense)
+- CMake >= 3.10
+- A C++17 compiler (GCC >= 9 recommended)
+
+---
+
+## 🔧 Building ViSP (once)
 
 ```bash
-cd ~/franka_ws/src/visp/build
-cmake .. -DCMAKE_BUILD_TYPE=Release -DCMAKE_INSTALL_PREFIX=~/visp_install -DBUILD_EXAMPLES=ON -DBUILD_DEMOS=ON
+# Clone ViSP
+git clone https://github.com/lagadic/visp.git
+cd visp
+mkdir build && cd build
+
+# Configure + build + install
+cmake .. -DCMAKE_BUILD_TYPE=Release -DCMAKE_INSTALL_PREFIX=~/visp_install -DBUILD_EXAMPLES=OFF -DBUILD_DEMOS=OFF
 make -j$(nproc)
 make install
 ```
 
-Then build this project:
+This will install ViSP into `~/visp_install`.
+
+---
+
+## 🚀 Building CHRPS Visual Servo
 
 ```bash
-cd ~/chrps_visual_servo
-mkdir -p build && cd build
-cmake .. -DCMAKE_BUILD_TYPE=Release -DVISP_DIR=~/visp_install/lib/cmake/visp
+git clone https://github.com/ulubilgeulusoy/chrps_visual_servo.git
+cd chrps_visual_servo
+mkdir build && cd build
+
+cmake .. -DCMAKE_BUILD_TYPE=Release -DViSP_DIR=~/visp_install/lib/cmake/visp
 make -j$(nproc)
 ```
 
 ---
 
-## Running
+## ▶️ Running
 
-Example usage:
+Example run (FR3 connected at `172.16.0.2`):
 
 ```bash
-cd ~/chrps_visual_servo/build
 ./servoFrankaIBVS_CHRPS \
-  --eMc ../config/eMc.yaml \
+  --eMc config/eMc.yaml \
   --ip 172.16.0.2 \
-  --no-convergence-threshold \
-  --adaptive-gain \
-  --plot \
   --tag-size 0.05 \
-  --desired-factor 9
+  --desired-factor 9 \
+  --adaptive-gain \
+  --plot
 ```
 
-You can also use the helper script:
+- `--tag-size` sets the physical AprilTag size in meters (default `0.05 m`)
+- `--desired-factor` sets how many times the tag size is used to define desired Z distance (default `9`)
+- `--eMc` provides the camera-to-end-effector calibration file
+- `--adaptive-gain` improves convergence
+- `--plot` shows feature and velocity curves
 
-```bash
-./run_visual_servo_CHRPS.sh
+---
+
+## 📂 Project Structure
+
+```
+chrps_visual_servo/
+│
+├── src/
+│   └── servoFrankaIBVS_CHRPS.cpp    # main application
+├── config/
+│   └── eMc.yaml                     # sample extrinsic calibration file
+├── CMakeLists.txt
+└── README.md
 ```
 
 ---
 
-## Arguments
+## 📝 Notes
 
-- `--tag-size <m>` : AprilTag size in meters (default: `0.05`)
-- `--desired-factor <n>` : desired distance as multiple of tag size (default: `9`)
-- `--ip <addr>` : Franka controller IP (default: `192.168.1.1`)
-- `--eMc <file>` : YAML file with camera extrinsic calibration
-- `--adaptive-gain` : Enable adaptive control gain
-- `--plot` : Show live plots of errors and velocities
+- Default tag family is `36h11`.
+- The robot must be in **velocity control mode** and connected before running.
+- If no tag is detected, the robot moves back briefly to try to reacquire it.
+
+---
+
+## ⚖️ License
+
+This project uses the GPLv2 license (from ViSP). See [LICENSE](LICENSE) for details.
