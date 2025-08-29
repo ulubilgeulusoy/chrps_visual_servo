@@ -74,6 +74,8 @@
 #include <visp3/visual_features/vpFeaturePoint.h>
 #include <visp3/vs/vpServo.h>
 #include <visp3/vs/vpServoDisplay.h>
+#include <visp3/core/vpMath.h>
+
 
 #if defined(VISP_HAVE_REALSENSE2) && defined(VISP_HAVE_DISPLAY) && defined(VISP_HAVE_FRANKA) && defined(VISP_HAVE_PUGIXML)
 
@@ -119,6 +121,23 @@ int main(int argc, char **argv)
   bool opt_task_sequencing = false;
   double convergence_threshold = 0.00005;
   int no_tag_counter = 0;
+  // ---- Lost-target backoff + scan params ----
+  double scan_backoff_secs = 3.0;          // time to just back up before scanning
+  double backoff_speed = 0.02;             // m/s during backoff (positive = forward, here we use negative)
+
+  double scan_wx_amp = vpMath::rad(18);    // rad/s amplitude for pitch (rotate around x)
+  double scan_wy_amp = vpMath::rad(18);    // rad/s amplitude for roll  (rotate around y)
+  double scan_wz_amp = vpMath::rad(8);     // rad/s amplitude for a small yaw (around z)
+
+  double scan_fx = 0.33;                   // Hz for pitch oscillation
+  double scan_fy = 0.25;                   // Hz for roll oscillation
+  double scan_fz = 0.20;                   // Hz for yaw oscillation
+
+  double max_linear = 0.05;                // safety caps
+  double max_angular = vpMath::rad(20);
+
+  double lost_start_ms = -1.0;             // timestamp when we first lost the tag
+  
 
 
 
@@ -424,8 +443,10 @@ int main(int argc, char **argv)
 
       // Only one tag is detected
       if (ret && (c_M_o_vec.size() == 1)) {
-  	no_tag_counter = 0; // reset
-  	c_M_o = c_M_o_vec[0];   
+        no_tag_counter = 0; // reset
+        c_M_o = c_M_o_vec[0];
+        lost_start_ms = -1.0; // <--- add this line
+
 
 
         static bool first_time = true;
@@ -531,18 +552,54 @@ int main(int argc, char **argv)
       
       
       else {
-    	no_tag_counter++;
-   	v_c = 0;
-    	v_c.resize(6);
+        // Tag not detected
+        if (lost_start_ms < 0.0) {
+          lost_start_ms = vpTime::measureTimeMs(); // start the "lost" timer
+        }
 
-    	if (no_tag_counter < 150) { // ~5 seconds at 30 Hz
-        	v_c[2] = -0.02; // move back and find april tag (Ulu 8/28/2025)
-    	}
-    	else {
-        	std::cout << "No tag for a while → stopping" << std::endl;
-        	v_c = 0;
-    	}
-      } 
+        const double now_ms = vpTime::measureTimeMs();
+        const double dt = (now_ms - lost_start_ms) / 1000.0; // seconds since tag lost
+
+        v_c = 0;
+        v_c.resize(6);
+
+        if (dt < scan_backoff_secs) {
+          // Phase 1: back off to widen FOV
+          v_c[2] = -std::min(backoff_speed, max_linear); // camera-frame +Z is forward; negative backs up
+          vpDisplay::displayText(I, 60, 20, "No tag: backing up to widen FOV...", vpColor::yellow);
+        } else {
+          // Phase 2: head-tilt scan (pitch/roll/yaw oscillations)
+          const double two_pi = 2.0 * M_PI;
+
+          // angular velocities (rad/s) in camera frame
+          double wx = scan_wx_amp * std::sin(two_pi * scan_fx * dt);            // pitch
+          double wy = scan_wy_amp * std::sin(two_pi * scan_fy * dt + M_PI/2.0); // roll (phase shifted to vary)
+          double wz = scan_wz_amp * std::sin(two_pi * scan_fz * dt);            // small yaw
+
+          // safety clamp
+          wx = std::max(-max_angular, std::min(max_angular, wx));
+          wy = std::max(-max_angular, std::min(max_angular, wy));
+          wz = std::max(-max_angular, std::min(max_angular, wz));
+
+          // optional tiny lateral sweep to help (comment out if you prefer only rotation)
+          double vx = 0.0;
+          double vy = 0.0;
+          // e.g., small lateral wiggle:
+          // vx = 0.005 * std::sin(two_pi * 0.1 * dt);
+          // vy = 0.005 * std::cos(two_pi * 0.1 * dt);
+
+          // assign velocities (camera frame)
+          v_c[0] = std::max(-max_linear, std::min(max_linear, vx));
+          v_c[1] = std::max(-max_linear, std::min(max_linear, vy));
+          v_c[2] = 0.0;  // stop backing up once scanning; or keep a tiny negative if you want continued retreat
+          v_c[3] = wx;
+          v_c[4] = wy;
+          v_c[5] = wz;
+
+          vpDisplay::displayText(I, 60, 20, "No tag: scanning (tilt/roll/yaw)...", vpColor::yellow);
+        }
+}
+
 
       if (!send_velocities) {
         v_c = 0;
