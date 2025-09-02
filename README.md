@@ -1,9 +1,39 @@
 # CHRPS Visual Servo
 
 Visual servoing application for the Franka Research 3 (FR3) robot using ViSP and an Intel RealSense camera.  
-This project extends ViSP’s `servoFrankaIBVS` example with configurable tag size, adjustable desired distance, and basic recovery behavior when the AprilTag is not visible.
+This project extends ViSP’s `servoFrankaIBVS` example with configurable tag size, adjustable desired distance, and lost-target recovery behavior when the AprilTag is not visible.
 
----
+## Lost-target recovery
+
+When the AprilTag is lost, the controller **does not sweep**. Instead it uses the
+**last known image drift** of the tag to **turn directly toward where it was heading**.
+
+### Logic
+1. **Backoff window (default 3.5 s)**  
+   Gently move backward to widen FOV.
+2. **Biased turn window (default 3.5 s)**  
+   Apply an angular velocity bias from the last centroid motion in pixels/sec:  
+   - Horizontal drift → yaw/roll bias  
+   - Vertical drift → pitch bias  
+   The bias decays over time if the tag is still not found.
+
+If the tag reappears, the timer resets and normal IBVS resumes.
+
+### Tuning knobs (in `servoFrankaIBVS_CHRPS.cpp`)
+- `k_ang` (px/s → rad/s gain) and optional `bias_boost` multiply how hard we turn.
+- `max_angular` caps angular speed.
+- `bias_window_secs` controls how long we keep the pure biased turn before decaying.
+- `scan_backoff_secs` controls the initial backoff duration.
+- Optional: a small `v_c[2] = -0.01` m/s during biased turn can help re-acquire.
+
+Example safe settings:
+```cpp
+double k_ang = vpMath::rad(0.12);
+double bias_boost = 1.4;
+double max_angular = vpMath::rad(30);
+double bias_window_secs = 3.5;
+double scan_backoff_secs = 3.5;
+
 
 ## 📦 Dependencies
 
@@ -55,7 +85,7 @@ Example run (FR3 connected at `172.16.0.2`):
   --eMc config/eMc.yaml \
   --ip 172.16.0.2 \
   --tag-size 0.05 \
-  --desired-factor 9 \
+  --desired-factor 6 \
   --adaptive-gain \
   --plot
 ```
@@ -67,6 +97,10 @@ Example run (FR3 connected at `172.16.0.2`):
 - `--plot` shows feature and velocity curves
 
 ---
+
+## Simple Build and Run (alternative)
+
+./run_visual_servo_CHRPS.sh
 
 ## 📂 Project Structure
 
