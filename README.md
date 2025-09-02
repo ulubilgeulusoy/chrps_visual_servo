@@ -5,7 +5,7 @@ This project extends ViSP’s `servoFrankaIBVS` example with configurable tag si
 
 ## Lost-target recovery
 
-When the AprilTag is lost, the controller **does not sweep**. Instead it uses the
+When the AprilTag is lost, the controller uses the
 **last known image drift** of the tag to **turn directly toward where it was heading**.
 
 ### Logic
