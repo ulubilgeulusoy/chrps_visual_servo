@@ -75,6 +75,10 @@
 #include <visp3/vs/vpServo.h>
 #include <visp3/vs/vpServoDisplay.h>
 #include <visp3/core/vpMath.h>
+#include <cmath>       // sin, exp, M_PI
+#include <algorithm>   // min, max
+#include <tuple>       // tuple, tie, make_tuple
+
 
 
 #if defined(VISP_HAVE_REALSENSE2) && defined(VISP_HAVE_DISPLAY) && defined(VISP_HAVE_FRANKA) && defined(VISP_HAVE_PUGIXML)
@@ -125,19 +129,44 @@ int main(int argc, char **argv)
   double scan_backoff_secs = 3.0;          // time to just back up before scanning
   double backoff_speed = 0.02;             // m/s during backoff (positive = forward, here we use negative)
 
+  double bias_window_secs = 2.5;   // duration of pure biased turn before any fallback
+  double k_ang = vpMath::rad(0.06); // px/s -> rad/s gain (tune)
+
+
   double scan_wx_amp = vpMath::rad(18);    // rad/s amplitude for pitch (rotate around x)
   double scan_wy_amp = vpMath::rad(18);    // rad/s amplitude for roll  (rotate around y)
-  double scan_wz_amp = vpMath::rad(8);     // rad/s amplitude for a small yaw (around z)
+  double scan_wz_amp = vpMath::rad(0);     // rad/s amplitude for a small yaw (around z)
 
   double scan_fx = 0.33;                   // Hz for pitch oscillation
   double scan_fy = 0.25;                   // Hz for roll oscillation
-  double scan_fz = 0.20;                   // Hz for yaw oscillation
+  double scan_fz = 0.0;                   // Hz for yaw oscillation
 
   double max_linear = 0.05;                // safety caps
   double max_angular = vpMath::rad(20);
 
   double lost_start_ms = -1.0;             // timestamp when we first lost the tag
   
+
+  // ---- Last-seen tag info for biased recovery ----
+  bool have_last = false;        // do we have a previous measurement?
+  double t_prev = 0.0, u_prev = 0.0, v_prev = 0.0, s_prev = 0.0;
+  double t_last = 0.0, u_last = 0.0, v_last = 0.0, s_last = 0.0;  // most recent
+
+  // helper: compute centroid & “size” (px)
+  auto compute_centroid_and_size = [](const std::vector<vpImagePoint>& poly){
+    double u = 0.0, v = 0.0;
+    for (const auto& p : poly) { u += p.get_u(); v += p.get_v(); }
+    u /= poly.size(); v /= poly.size();
+
+    // crude size proxy: perimeter in pixels
+    double perim = 0.0;
+    for (size_t i = 0; i < poly.size(); ++i) {
+      const auto& a = poly[i];
+      const auto& b = poly[(i+1) % poly.size()];
+      perim += vpImagePoint::distance(a, b);
+    }
+    return std::make_tuple(u, v, perim);
+  };
 
 
 
@@ -480,6 +509,25 @@ int main(int argc, char **argv)
         // Get tag corners
         std::vector<vpImagePoint> corners = detector.getPolygon(0);
 
+        // --- Update last-seen centroid/size history for biased recovery ---
+        {
+          double now_ms = vpTime::measureTimeMs();
+
+          double u_cent, v_cent, size_px;
+          std::tie(u_cent, v_cent, size_px) = compute_centroid_and_size(corners);
+
+          // Shift last -> prev
+          if (have_last) {
+            t_prev = t_last; u_prev = u_last; v_prev = v_last; s_prev = s_last;
+          }
+
+          t_last = now_ms; u_last = u_cent; v_last = v_cent; s_last = size_px;
+          have_last = true;
+
+          // We have the tag again: reset lost timer so bias starts fresh on next loss
+          lost_start_ms = -1.0;
+        }
+
         // Update visual features
         for (size_t i = 0; i < corners.size(); ++i) {
           // Update the point feature from the tag corners location
@@ -557,48 +605,72 @@ int main(int argc, char **argv)
           lost_start_ms = vpTime::measureTimeMs(); // start the "lost" timer
         }
 
-        const double now_ms = vpTime::measureTimeMs();
-        const double dt = (now_ms - lost_start_ms) / 1000.0; // seconds since tag lost
+        const double now_ms  = vpTime::measureTimeMs();
+        const double dt_lost = (now_ms - lost_start_ms) / 1000.0;
 
-        v_c = 0;
-        v_c.resize(6);
+        v_c = 0; v_c.resize(6);
 
-        if (dt < scan_backoff_secs) {
-          // Phase 1: back off to widen FOV
-          v_c[2] = -std::min(backoff_speed, max_linear); // camera-frame +Z is forward; negative backs up
-          vpDisplay::displayText(I, 60, 20, "No tag: backing up to widen FOV...", vpColor::yellow);
-        } else {
-          // Phase 2: head-tilt scan (pitch/roll/yaw oscillations)
-          const double two_pi = 2.0 * M_PI;
+        // Phase A: fixed backoff for the first scan_backoff_secs seconds
+        if (dt_lost < scan_backoff_secs) {
+          v_c[2] = -std::min(backoff_speed, max_linear);
+          // ...
+        }
 
-          // angular velocities (rad/s) in camera frame
-          double wx = scan_wx_amp * std::sin(two_pi * scan_fx * dt);            // pitch
-          double wy = scan_wy_amp * std::sin(two_pi * scan_fy * dt + M_PI/2.0); // roll (phase shifted to vary)
-          double wz = scan_wz_amp * std::sin(two_pi * scan_fz * dt);            // small yaw
+        else {
+          
+          // Phase B: pure biased turn (no sine)
+          // Use last image-space motion to pick a direction, then turn that way for a short window.
+          double wx = 0.0, wy = 0.0, wz = 0.0;
+
+          if (have_last && t_prev > 0.0 && (t_last - t_prev) > 1e-3) {
+            double dt_obs = (t_last - t_prev) / 1000.0;
+            double du_dt  = (u_last - u_prev) / dt_obs;  // + right
+            double dv_dt  = (v_last - v_prev) / dt_obs;  // + down
+
+            // clamp image-velocity to avoid spikes
+            du_dt = std::max(-2000.0, std::min(2000.0, du_dt));
+            dv_dt = std::max(-2000.0, std::min(2000.0, dv_dt));
+
+            double bias_boost = 2.5;
+
+            // map image drift -> angular velocity bias (camera frame)
+            double bias_wz = bias_boost * (k_ang * du_dt);   // yaw toward where it drifted horizontally
+            double bias_wx = bias_boost * (-k_ang * dv_dt);   // pitch up if it drifted up (flip sign if wrong)
+            double bias_wy = 0.5 * k_ang * du_dt; // small roll assist
+
+            // During the initial bias window, apply full bias (no decay, no sine)
+            if (dt_lost <= bias_window_secs) {
+              wx = bias_wx;
+              wy = bias_wy;
+              wz = bias_wz;
+            } else {
+              // After the window, you can keep a gentle, decayed bias or (optionally) re-enable a symmetric sweep.
+              double decay = std::exp(-0.8 * (dt_lost - bias_window_secs));
+              wx = bias_wx * decay;
+              wy = bias_wy * decay;
+              wz = bias_wz * decay;
+            }
+          } else {
+            // No history? stay still (or set a tiny fixed yaw if you prefer)
+            wx = 0.0; wy = 0.0; wz = 0.0;
+          }
 
           // safety clamp
           wx = std::max(-max_angular, std::min(max_angular, wx));
           wy = std::max(-max_angular, std::min(max_angular, wy));
           wz = std::max(-max_angular, std::min(max_angular, wz));
 
-          // optional tiny lateral sweep to help (comment out if you prefer only rotation)
-          double vx = 0.0;
-          double vy = 0.0;
-          // e.g., small lateral wiggle:
-          // vx = 0.005 * std::sin(two_pi * 0.1 * dt);
-          // vy = 0.005 * std::cos(two_pi * 0.1 * dt);
+          // no linear translation in scan phase
+          v_c[0] = 0.0; v_c[1] = 0.0; v_c[2] = 0.0;
+          v_c[3] = wx;  v_c[4] = wy;  v_c[5] = wz;
 
-          // assign velocities (camera frame)
-          v_c[0] = std::max(-max_linear, std::min(max_linear, vx));
-          v_c[1] = std::max(-max_linear, std::min(max_linear, vy));
-          v_c[2] = 0.0;  // stop backing up once scanning; or keep a tiny negative if you want continued retreat
-          v_c[3] = wx;
-          v_c[4] = wy;
-          v_c[5] = wz;
+          vpDisplay::displayText(I, 60, 20,
+            (dt_lost <= bias_window_secs) ? "No tag: pure biased turn..." : "No tag: decaying biased turn...",
+            vpColor::yellow);
 
-          vpDisplay::displayText(I, 60, 20, "No tag: scanning (tilt/roll/yaw)...", vpColor::yellow);
         }
-}
+
+      }
 
 
       if (!send_velocities) {
