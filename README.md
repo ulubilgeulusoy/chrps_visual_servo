@@ -119,9 +119,11 @@ chrps_visual_servo/
 
 ## 📝 Notes
 
-- Default tag family is `36h11`.
+- Default April tag family is `36h11`.
+- Any April tag ID works, multiple IDs can be used in same tracking session but one tag at a time needs to be used.
 - The robot must be in **velocity control mode** and connected before running.
-- If no tag is detected, the robot moves back briefly to try to reacquire it.
+- If no tag is detected, the robot moves back briefly and look into the direction last tag seen to try to reacquire it.
+  
 
 ---
 
