@@ -39,3 +39,21 @@
 
 # debug information files
 *.dwo
+
+# ROS 2 Build artifacts
+build/
+install/
+log/
+
+# ViSP source (external dependency)
+visp/
+
+# IDE files
+.vscode/
+*.swp
+*.swo
+*~
+
+# OS files
+.DS_Store
+Thumbs.db
